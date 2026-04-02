@@ -65,13 +65,22 @@ const QUESTS = [
 ];
 
 // ── Typeform API fetcher ─────────────────────────────────────────────────────
+function buildUrl(formId, before) {
+  const params = `page_size=1000${before ? `&before=${before}` : ""}`;
+  if (import.meta.env.PROD) {
+    return `/api/typeform?formId=${formId}&${params}`;
+  }
+  return `/api/typeform/forms/${formId}/responses?${params}`;
+}
+
 async function fetchFormResponses(formId) {
   try {
     const allItems = [];
     let before = null;
     while (true) {
-      const url = `/api/typeform/forms/${formId}/responses?page_size=1000${before ? `&before=${before}` : ""}`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${TYPEFORM_TOKEN}` } });
+      const res = await fetch(buildUrl(formId, before), {
+        headers: { Authorization: `Bearer ${TYPEFORM_TOKEN}` },
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const items = data.items || [];
