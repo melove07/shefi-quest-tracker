@@ -55,7 +55,7 @@ const QUESTS = [
     description: "Participate in governance by staking in the RootstockCollective DAO.",
   },
   {
-    id: "a3NhVSaE",
+    id: "dyt8gnqi",
     title: "Download Decentraland",
     emoji: "🌐",
     category: "Metaverse",
