@@ -62,6 +62,14 @@ const QUESTS = [
     points: 25,
     description: "Step into Web3's virtual world — download and explore Decentraland.",
   },
+  {
+    id: "h24RwqF6",
+    title: "Connect Your Wallet to Coinfello & Do an AI Crypto Action",
+    emoji: "🤖",
+    category: "Bonus",
+    points: 25,
+    description: "Connect your wallet to Coinfello and complete an AI-powered crypto action.",
+  },
 ];
 
 // ── Typeform API fetcher ─────────────────────────────────────────────────────
