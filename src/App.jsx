@@ -113,10 +113,10 @@ function extractPerson(response) {
   let name = "";
 
   if (email) {
-    // 2. Derive display name from email prefix
+    // 2. Guess first name from email prefix — split on dots, underscores, numbers
     const prefix = email.split("@")[0];
-    const readable = prefix.replace(/\./g, " ").trim();
-    name = readable.charAt(0).toUpperCase() + readable.slice(1);
+    const firstName = prefix.split(/[._\-0-9]/)[0];
+    name = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
   } else {
     // 3. Fall back to text fields, skipping wallet addresses
     for (const answer of answers) {
