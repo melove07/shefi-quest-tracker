@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/sync-typeform-to-notion",
+      "schedule": "0 9 * * *"
+    }
+  ]
+}
