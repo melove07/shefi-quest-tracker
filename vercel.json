@@ -3,6 +3,10 @@
     {
       "path": "/api/sync-typeform-to-notion",
       "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/sync-applications-to-notion",
+      "schedule": "15 9 * * *"
     }
   ]
 }
