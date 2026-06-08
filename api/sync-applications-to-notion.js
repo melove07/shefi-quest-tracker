@@ -384,27 +384,21 @@ function title(value) {
 // ---------- Handler ----------
 
 export default async function handler(req, res) {
-  if (CRON_SECRET) {
-    const auth = req.headers?.authorization || "";
-    if (auth !== `Bearer ${CRON_SECRET}`) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-  }
-
-  const missing = {
-    TYPEFORM_TOKEN: !TYPEFORM_TOKEN,
-    NOTION_TOKEN: !NOTION_TOKEN,
-    APPLICATIONS_DB_ID: !APPLICATIONS_DB_ID,
-  };
-  if (missing.TYPEFORM_TOKEN || missing.NOTION_TOKEN || missing.APPLICATIONS_DB_ID) {
-    return res.status(500).json({ error: "Missing env vars", missing });
-  }
-
-  // Probe mode: dump the main form's field schema with our field-title matches
-  // so Maggie can sanity-check the fuzzy matchers after deploy. Hit:
-  //   /api/sync-applications-to-notion?probe=fields
   const url = new URL(req.url, `http://${req.headers?.host || "localhost"}`);
-  if (url.searchParams.get("probe") === "fields") {
+  const isProbe = url.searchParams.get("probe") === "fields";
+
+  // Probe mode runs BEFORE the cron auth check so Maggie can hit it from a
+  // browser tab without juggling CRON_SECRET. It only reads the form schema
+  // from Typeform — the same data anyone who opens the form already sees —
+  // and never touches Notion or sends email, so it's safe to leave unauth'd.
+  // Required env var for probe: TYPEFORM_TOKEN only.
+  if (isProbe) {
+    if (!TYPEFORM_TOKEN) {
+      return res.status(500).json({
+        error: "Missing env var",
+        missing: { TYPEFORM_TOKEN: true },
+      });
+    }
     try {
       const form = await typeformGet(`/forms/${MAIN_FORM_ID}`);
       const { map, debug } = resolveFieldMap(form);
@@ -422,6 +416,24 @@ export default async function handler(req, res) {
     } catch (e) {
       return res.status(500).json({ error: String(e).slice(0, 500) });
     }
+  }
+
+  // Cron-mode auth check. Vercel cron auto-attaches Authorization: Bearer
+  // <CRON_SECRET> on its scheduled invocations.
+  if (CRON_SECRET) {
+    const auth = req.headers?.authorization || "";
+    if (auth !== `Bearer ${CRON_SECRET}`) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+  }
+
+  const missing = {
+    TYPEFORM_TOKEN: !TYPEFORM_TOKEN,
+    NOTION_TOKEN: !NOTION_TOKEN,
+    APPLICATIONS_DB_ID: !APPLICATIONS_DB_ID,
+  };
+  if (missing.TYPEFORM_TOKEN || missing.NOTION_TOKEN || missing.APPLICATIONS_DB_ID) {
+    return res.status(500).json({ error: "Missing env vars", missing });
   }
 
   const startedAt = new Date().toISOString();
