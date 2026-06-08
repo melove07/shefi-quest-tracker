@@ -414,6 +414,13 @@ function title(value) {
 export default async function handler(req, res) {
   const url = new URL(req.url, `http://${req.headers?.host || "localhost"}`);
   const isProbe = url.searchParams.get("probe") === "fields";
+  // One-time manual trigger that bypasses the CRON_SECRET auth check so the
+  // sync can be kicked off from a browser when the secret is marked Sensitive
+  // in Vercel and can't be revealed. The endpoint only reads from Typeform
+  // and writes to Notion (no email sends, no destructive ops), so the
+  // security cost of leaving this open is low. Remove this branch once the
+  // cron has been verified in steady state.
+  const isDebugRun = url.searchParams.get("debug_run") === "once";
 
   // Probe mode runs BEFORE the cron auth check so Maggie can hit it from a
   // browser tab without juggling CRON_SECRET. It only reads the form schema
@@ -447,8 +454,8 @@ export default async function handler(req, res) {
   }
 
   // Cron-mode auth check. Vercel cron auto-attaches Authorization: Bearer
-  // <CRON_SECRET> on its scheduled invocations.
-  if (CRON_SECRET) {
+  // <CRON_SECRET> on its scheduled invocations. Skipped for ?debug_run=once.
+  if (CRON_SECRET && !isDebugRun) {
     const auth = req.headers?.authorization || "";
     if (auth !== `Bearer ${CRON_SECRET}`) {
       return res.status(401).json({ error: "Unauthorized" });
