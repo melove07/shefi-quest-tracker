@@ -94,7 +94,30 @@ const FIELD_MATCHERS = [
       /where\s+did\s+you\s+(hear|find)/i,
     ],
   },
+  {
+    // The main S17 application asks "Do you need a scholarship if accepted into
+    // SheFi?". We pull the answer so Electra can route the Applied-stage nudge
+    // (scholarship-focused vs. pay-focused vs. fallback).
+    col: "Wants scholarship",
+    type: ["multiple_choice", "yes_no", "dropdown"],
+    patterns: [/scholarship/i],
+  },
 ];
+
+// Normalize freeform "do you need a scholarship?" answers to our three SELECT
+// options. We accept anything that obviously means yes/no; anything ambiguous
+// (e.g. "I'm not sure", "Maybe") becomes "Maybe" so Electra falls back to the
+// generic both-paths template.
+function normalizeScholarshipAnswer(raw) {
+  if (!raw) return null;
+  const v = String(raw).trim().toLowerCase();
+  if (!v) return null;
+  if (/^no\b/.test(v) || v === "no") return "No";
+  if (/^yes\b/.test(v) || v === "yes") return "Yes";
+  // Catch "I need a scholarship", "I would benefit from a scholarship", etc.
+  if (/\bneed\b/.test(v) || /\bwould benefit\b/.test(v)) return "Yes";
+  return "Maybe";
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -329,6 +352,9 @@ function aggregateByEmail(items, fieldMap, stageWhenComplete) {
       lastName: extractAnswerByFieldId(item, fieldMap["Last name"]),
       country: extractAnswerByFieldId(item, fieldMap["Country"]),
       howHeard: extractAnswerByFieldId(item, fieldMap["How heard"]),
+      wantsScholarship: normalizeScholarshipAnswer(
+        extractAnswerByFieldId(item, fieldMap["Wants scholarship"])
+      ),
     });
   }
   return out;
@@ -353,7 +379,7 @@ function mergeSignals(...maps) {
         merged.dateISO = sig.dateISO;
       }
       // Identity fields: fill in any that were missing
-      for (const k of ["firstName", "lastName", "country", "howHeard"]) {
+      for (const k of ["firstName", "lastName", "country", "howHeard", "wantsScholarship"]) {
         if (!merged[k] && sig[k]) merged[k] = sig[k];
       }
       out.set(email, merged);
@@ -503,6 +529,9 @@ export default async function handler(req, res) {
           if (sig.lastName) props["Last name"] = richText(sig.lastName);
           if (sig.country) props["Country"] = richText(sig.country);
           if (sig.howHeard) props["How heard"] = richText(sig.howHeard);
+          if (sig.wantsScholarship) {
+            props["Wants scholarship"] = { select: { name: sig.wantsScholarship } };
+          }
           // If they appeared in the scholarship signals, flag that source too
           if (scholarshipSignals.has(email)) {
             props.Source = {
@@ -557,6 +586,12 @@ export default async function handler(req, res) {
           fillIfBlank("Last name", sig.lastName);
           fillIfBlank("Country", sig.country);
           fillIfBlank("How heard", sig.howHeard);
+          // Wants scholarship is a SELECT, not rich text; check + set differently
+          if (sig.wantsScholarship && !getSelectName(existing, "Wants scholarship")) {
+            propsToUpdate["Wants scholarship"] = {
+              select: { name: sig.wantsScholarship },
+            };
+          }
 
           // Source: union with existing
           const currentSources = new Set(getMultiSelectNames(existing, "Source"));
