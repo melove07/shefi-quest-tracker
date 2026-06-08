@@ -16,8 +16,10 @@
 //   CRON_SECRET           — if set, requires `Authorization: Bearer <secret>`
 //                           on the request. Vercel cron auto-attaches this.
 //
-// Cohort boundary: only application responses submitted on or after 2026-03-14
-// count as S17. Earlier responses to rUUJ3931 belong to S15/S16 and are ignored.
+// Cohort boundary: only application responses submitted on or after 2026-03-01
+// count as S17. S16 started on March 17, so anything March 1+ is an applicant
+// for the upcoming cohort. Earlier responses to rUUJ3931 belong to S15/S16 and
+// are ignored.
 //
 // Probe mode: GET /api/sync-applications-to-notion?probe=fields
 // returns the field schema of rUUJ3931 with which fields matched first-name /
@@ -33,9 +35,10 @@ const SCHOLARSHIP_FORM_ID = process.env.SCHOLARSHIP_FORM_ID || null;
 const CRON_SECRET = process.env.CRON_SECRET;
 const NOTION_VERSION = "2022-06-28";
 
-// S17 cohort starts 2026-03-17; the application window opens a few days early.
-// Anything submitted at or after this datetime is S17.
-const S17_CUTOFF_ISO = "2026-03-14T00:00:00Z";
+// S16 started 2026-03-17, so any application submitted on or after 2026-03-01
+// is considered an S17 applicant. (Maggie's call — wider net to make sure we
+// catch everyone who was actually targeting the next cohort.)
+const S17_CUTOFF_ISO = "2026-03-01T00:00:00Z";
 
 const MAIN_FORM_ID = "rUUJ3931";
 
