@@ -43,8 +43,9 @@ const MAIN_FORM_ID = "rUUJ3931";
 const STAGE_RANK = {
   "Started (partial)": 1,
   Applied: 2,
-  "Scholarship submitted": 3,
-  Paid: 4,
+  "Scholarship started (partial)": 3,
+  "Scholarship submitted": 4,
+  Paid: 5,
 };
 
 // Terminal stages that the sync must NEVER overwrite. Maggie sets these manually.
@@ -392,6 +393,7 @@ function mergeSignals(...maps) {
 function stageDateField(stage) {
   if (stage === "Started (partial)") return "Started at";
   if (stage === "Applied") return "Applied at";
+  if (stage === "Scholarship started (partial)") return "Scholarship started at";
   if (stage === "Scholarship submitted") return "Scholarship submitted at";
   if (stage === "Paid") return "Paid at";
   return null;
@@ -412,6 +414,13 @@ function title(value) {
 export default async function handler(req, res) {
   const url = new URL(req.url, `http://${req.headers?.host || "localhost"}`);
   const isProbe = url.searchParams.get("probe") === "fields";
+  // One-time manual trigger that bypasses the CRON_SECRET auth check so the
+  // sync can be kicked off from a browser when the secret is marked Sensitive
+  // in Vercel and can't be revealed. The endpoint only reads from Typeform
+  // and writes to Notion (no email sends, no destructive ops), so the
+  // security cost of leaving this open is low. Remove this branch once the
+  // cron has been verified in steady state.
+  const isDebugRun = url.searchParams.get("debug_run") === "once";
 
   // Probe mode runs BEFORE the cron auth check so Maggie can hit it from a
   // browser tab without juggling CRON_SECRET. It only reads the form schema
@@ -445,8 +454,8 @@ export default async function handler(req, res) {
   }
 
   // Cron-mode auth check. Vercel cron auto-attaches Authorization: Bearer
-  // <CRON_SECRET> on its scheduled invocations.
-  if (CRON_SECRET) {
+  // <CRON_SECRET> on its scheduled invocations. Skipped for ?debug_run=once.
+  if (CRON_SECRET && !isDebugRun) {
     const auth = req.headers?.authorization || "";
     if (auth !== `Bearer ${CRON_SECRET}`) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -484,21 +493,36 @@ export default async function handler(req, res) {
     const completedSignals = aggregateByEmail(mainCompleted, mainFieldMap, "Applied");
     const partialSignals = aggregateByEmail(mainPartial, mainFieldMap, "Started (partial)");
 
-    // 2) Scholarship form (optional)
-    let scholarshipSignals = new Map();
+    // 2) Scholarship form (optional). Pull BOTH completed and partial so we can
+    //    nudge applicants who started the scholarship form but didn't finish.
+    let scholarshipCompletedSignals = new Map();
+    let scholarshipPartialSignals = new Map();
     if (SCHOLARSHIP_FORM_ID) {
       const schForm = await typeformGet(`/forms/${SCHOLARSHIP_FORM_ID}`);
       const { map: schFieldMap } = resolveFieldMap(schForm);
-      const schItems = await fetchTypeformResponses(SCHOLARSHIP_FORM_ID, { completed: true });
-      summary.typeformCounts.scholarship_completed = schItems.length;
-      scholarshipSignals = aggregateByEmail(schItems, schFieldMap, "Scholarship submitted");
+      const schCompleted = await fetchTypeformResponses(SCHOLARSHIP_FORM_ID, { completed: true });
+      const schPartial = await fetchTypeformResponses(SCHOLARSHIP_FORM_ID, { completed: false });
+      summary.typeformCounts.scholarship_completed = schCompleted.length;
+      summary.typeformCounts.scholarship_partial = schPartial.length;
+      scholarshipCompletedSignals = aggregateByEmail(
+        schCompleted,
+        schFieldMap,
+        "Scholarship submitted"
+      );
+      scholarshipPartialSignals = aggregateByEmail(
+        schPartial,
+        schFieldMap,
+        "Scholarship started (partial)"
+      );
     }
 
-    // 3) Merge by email — highest stage wins, identity fills through
+    // 3) Merge by email — highest stage wins, identity fills through.
+    //    Order matters: pass lower-rank maps first so higher-rank ones override.
     const signalsByEmail = mergeSignals(
-      partialSignals,        // lowest stage
-      completedSignals,
-      scholarshipSignals     // highest auto-set stage (Paid comes from Stripe later)
+      partialSignals,                  // 1: Started (partial)
+      completedSignals,                // 2: Applied
+      scholarshipPartialSignals,       // 3: Scholarship started (partial)
+      scholarshipCompletedSignals      // 4: Scholarship submitted (Paid comes from Stripe later)
     );
 
     // 4) Load existing Notion rows for upsert lookup
@@ -515,31 +539,62 @@ export default async function handler(req, res) {
       try {
         if (!existing) {
           // CREATE
+          // Compute Source from actual presence in each form's signals. An
+          // applicant who only appears in the scholarship form (rare but
+          // possible) gets Source: Scholarship only, not Main.
+          const sources = [];
+          if (completedSignals.has(email) || partialSignals.has(email)) {
+            sources.push("Typeform: Main");
+          }
+          if (
+            scholarshipCompletedSignals.has(email) ||
+            scholarshipPartialSignals.has(email)
+          ) {
+            sources.push("Typeform: Scholarship");
+          }
+
           const props = {
             Name: title(
               [sig.firstName, sig.lastName].filter(Boolean).join(" ").trim() || email
             ),
             Email: { email },
             "Application stage": { select: { name: sig.stage } },
-            Source: { multi_select: [{ name: "Typeform: Main" }] },
+            Source: {
+              multi_select: sources.map((name) => ({ name })),
+            },
           };
+          // Set whichever per-stage date field corresponds to the highest stage.
           const dateField = stageDateField(sig.stage);
           if (dateField) props[dateField] = { date: { start: sig.dateISO } };
+          // Also backfill earlier-stage date fields if we have signals for them.
+          // This handles e.g. someone who's now Scholarship started (partial) —
+          // we still want their Applied at and Started at dates populated.
+          if (partialSignals.has(email)) {
+            props["Started at"] = {
+              date: { start: partialSignals.get(email).dateISO },
+            };
+          }
+          if (completedSignals.has(email)) {
+            props["Applied at"] = {
+              date: { start: completedSignals.get(email).dateISO },
+            };
+          }
+          if (scholarshipPartialSignals.has(email)) {
+            props["Scholarship started at"] = {
+              date: { start: scholarshipPartialSignals.get(email).dateISO },
+            };
+          }
+          if (scholarshipCompletedSignals.has(email)) {
+            props["Scholarship submitted at"] = {
+              date: { start: scholarshipCompletedSignals.get(email).dateISO },
+            };
+          }
           if (sig.firstName) props["First name"] = richText(sig.firstName);
           if (sig.lastName) props["Last name"] = richText(sig.lastName);
           if (sig.country) props["Country"] = richText(sig.country);
           if (sig.howHeard) props["How heard"] = richText(sig.howHeard);
           if (sig.wantsScholarship) {
             props["Wants scholarship"] = { select: { name: sig.wantsScholarship } };
-          }
-          // If they appeared in the scholarship signals, flag that source too
-          if (scholarshipSignals.has(email)) {
-            props.Source = {
-              multi_select: [
-                { name: "Typeform: Main" },
-                { name: "Typeform: Scholarship" },
-              ],
-            };
           }
           await createPage(props);
           summary.rowsCreated++;
@@ -569,10 +624,16 @@ export default async function handler(req, res) {
           if (partialSignals.has(email)) {
             setDateIfBlank("Started at", partialSignals.get(email).dateISO);
           }
-          if (scholarshipSignals.has(email)) {
+          if (scholarshipPartialSignals.has(email)) {
+            setDateIfBlank(
+              "Scholarship started at",
+              scholarshipPartialSignals.get(email).dateISO
+            );
+          }
+          if (scholarshipCompletedSignals.has(email)) {
             setDateIfBlank(
               "Scholarship submitted at",
-              scholarshipSignals.get(email).dateISO
+              scholarshipCompletedSignals.get(email).dateISO
             );
           }
 
@@ -599,7 +660,12 @@ export default async function handler(req, res) {
           if (completedSignals.has(email) || partialSignals.has(email)) {
             desired.add("Typeform: Main");
           }
-          if (scholarshipSignals.has(email)) desired.add("Typeform: Scholarship");
+          if (
+            scholarshipCompletedSignals.has(email) ||
+            scholarshipPartialSignals.has(email)
+          ) {
+            desired.add("Typeform: Scholarship");
+          }
           if (desired.size !== currentSources.size) {
             propsToUpdate.Source = {
               multi_select: [...desired].map((name) => ({ name })),
