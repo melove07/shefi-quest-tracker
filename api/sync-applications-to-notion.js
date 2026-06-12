@@ -141,23 +141,31 @@ async function typeformGet(path) {
 // Fetch all responses (completed or partial) since the S17 cutoff. The Typeform
 // API caps page_size at 1000.
 //
-// IMPORTANT: the `since` query param filters on submitted_at, and partial
-// (incomplete) responses have no submitted_at — so sending `since` with
-// completed=false silently returns ZERO partials. This bug hid every partial
-// applicant until 2026-06-09. Completed fetches keep the server-side `since`.
-// Partial fetches walk ALL pages in the API's default order (Typeform rejects
-// `sort` combined with the `before` pagination token, so we can't early-stop
-// on landed_at) and rely on aggregateByEmail's client-side cutoff filter.
+// IMPORTANT — two Typeform API gotchas, both verified against the live API
+// on 2026-06-12:
+//
+// 1. Typeform distinguishes THREE response types: "completed" (submitted),
+//    "partial" (answered some questions, auto-saved, didn't finish), and
+//    "started" (opened the form, answered nothing). `completed=false` returns
+//    only the useless "started" rows — zero answers, zero emails. The real
+//    abandoned-with-email responses require `response_type=partial`.
+// 2. The `since` param filters on submitted_at, which partials don't have,
+//    so it can't be used server-side for them. Partial fetches walk all pages
+//    and rely on aggregateByEmail's client-side landed_at cutoff filter.
+//    (`sort` can't be combined with the `before` pagination token either.)
+//
 // Page fetches are cheap (1000 rows/request); Notion writes dominate runtime.
 async function fetchTypeformResponses(formId, { completed }) {
   const items = [];
   let before = null;
   while (true) {
-    const params = new URLSearchParams({
-      page_size: "1000",
-      completed: completed ? "true" : "false",
-    });
-    if (completed) params.set("since", S17_CUTOFF_ISO);
+    const params = new URLSearchParams({ page_size: "1000" });
+    if (completed) {
+      params.set("completed", "true");
+      params.set("since", S17_CUTOFF_ISO);
+    } else {
+      params.set("response_type", "partial");
+    }
     if (before) params.set("before", before);
     const data = await typeformGet(`/forms/${formId}/responses?${params}`);
     const page = data.items || [];
