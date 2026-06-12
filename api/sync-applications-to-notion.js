@@ -139,22 +139,38 @@ async function typeformGet(path) {
 }
 
 // Fetch all responses (completed or partial) since the S17 cutoff. The Typeform
-// API caps page_size at 1000 and supports a `since` filter — we use both so we
-// don't have to walk years of past-cohort data.
+// API caps page_size at 1000.
+//
+// IMPORTANT: the `since` query param filters on submitted_at, and partial
+// (incomplete) responses have no submitted_at — so sending `since` with
+// completed=false silently returns ZERO partials. This bug hid every partial
+// applicant until 2026-06-09. Completed fetches keep the server-side `since`;
+// partial fetches sort newest-first by landed_at and stop paginating once a
+// page falls entirely before the cutoff.
 async function fetchTypeformResponses(formId, { completed }) {
   const items = [];
   let before = null;
   while (true) {
     const params = new URLSearchParams({
       page_size: "1000",
-      since: S17_CUTOFF_ISO,
       completed: completed ? "true" : "false",
     });
+    if (completed) {
+      params.set("since", S17_CUTOFF_ISO);
+    } else {
+      params.set("sort", "landed_at,desc");
+    }
     if (before) params.set("before", before);
     const data = await typeformGet(`/forms/${formId}/responses?${params}`);
     const page = data.items || [];
     if (page.length === 0) break;
     items.push(...page);
+    // Partials are sorted newest-first by landed_at: once the oldest item on
+    // this page predates the cutoff, everything after it does too.
+    if (!completed) {
+      const oldest = page[page.length - 1]?.landed_at;
+      if (oldest && oldest < S17_CUTOFF_ISO) break;
+    }
     if (page.length < 1000) break;
     before = page[page.length - 1]?.token;
     if (!before) break;
@@ -328,19 +344,16 @@ function aggregateByEmail(items, fieldMap, stageWhenComplete) {
   for (const item of items) {
     const email = extractEmail(item);
     if (!email) continue;
-    const submitted = item.submitted_at || item.landed_at;
+    // Partials have no real submitted_at (or a zero-value placeholder like
+    // "0001-01-01..."); fall back to landed_at. The cutoff must be re-checked
+    // client-side here because the API's `since` filter doesn't cover partials.
+    const submittedAt =
+      item.submitted_at && !item.submitted_at.startsWith("0001")
+        ? item.submitted_at
+        : null;
+    const submitted = submittedAt || item.landed_at;
     if (!submitted) continue;
-    // Belt and suspenders: API filter handles this, but re-check client-side
-    // in case the cutoff ever changes mid-flight.
     if (submitted < S17_CUTOFF_ISO) continue;
-
-    // Completed responses always have submitted_at; partials have it set when
-    // Typeform auto-saves the abandoned attempt. We treat "answered at all but
-    // didn't complete" as the partial state.
-    const isPartial = !item.calculated?.score && !item.metadata?.user_agent
-      ? false // can't reliably detect from these alone
-      : false;
-    void isPartial;
 
     const stage = stageWhenComplete; // caller passes "Applied" or "Started (partial)"
     const dateISO = submitted.slice(0, 10); // YYYY-MM-DD
