@@ -42,6 +42,15 @@ const S17_CUTOFF_ISO = "2026-03-01T00:00:00Z";
 
 const MAIN_FORM_ID = "rUUJ3931";
 
+// Cohort tagging. S17 is the cohort that STARTED 2026-07-21 — the entire
+// March-through-July application wave was people applying to join S17. S18 is
+// the NEXT cohort: "future joining" people who apply on or after the S17 start
+// date. So anyone whose application date is >= this boundary is tagged S18;
+// everyone before it (essentially the whole existing pool) is S17. The sync
+// writes the Season column; Electra targets S18. (Compared against dateISO,
+// which is "YYYY-MM-DD".)
+const SEASON_BOUNDARY_DATE = "2026-07-21";
+
 // Application-stage ordering (lowest -> highest). The sync never downgrades.
 const STAGE_RANK = {
   "Started (partial)": 1,
@@ -253,7 +262,7 @@ function extractAnswerByFieldId(item, fieldId) {
 
 // ---------- Notion ----------
 
-async function notionApi(path, opts = {}) {
+async function notionApi(path, opts = {}, attempt = 0) {
   const res = await fetch(`https://api.notion.com/v1${path}`, {
     ...opts,
     headers: {
@@ -263,6 +272,16 @@ async function notionApi(path, opts = {}) {
       ...(opts.headers || {}),
     },
   });
+  // Notion caps the integration at ~3 requests/second and answers a burst with
+  // 429 + a Retry-After header (seconds). Honor it and retry a few times rather
+  // than aborting the whole sync — this is the difference between a run that
+  // resumes and one that dies on the first rate-limit blip.
+  if (res.status === 429 && attempt < 6) {
+    const hdr = parseFloat(res.headers.get("retry-after") || "1");
+    const waitMs = (Number.isFinite(hdr) ? hdr : 1) * 1000 + 300;
+    await sleep(waitMs);
+    return notionApi(path, opts, attempt + 1);
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Notion ${opts.method || "GET"} ${path} ${res.status}: ${text.slice(0, 300)}`);
@@ -283,6 +302,9 @@ async function fetchAllNotionRows() {
     rows.push(...(data.results || []));
     if (!data.has_more) break;
     cursor = data.next_cursor;
+    // The DB is now thousands of rows (55+ pages). Space the reads out so this
+    // phase stays under Notion's ~3 req/s limit instead of firing a burst.
+    await sleep(250);
   }
   return rows;
 }
@@ -553,6 +575,18 @@ export default async function handler(req, res) {
     for (const [email, sig] of signalsByEmail.entries()) {
       const existing = rowByEmail.get(email);
       try {
+        // Cohort tag: derive Season from the applicant's application date —
+        // completion first, then start, then the scholarship dates as a
+        // fallback — compared against the S18 boundary.
+        const seasonDate =
+          completedSignals.get(email)?.dateISO ||
+          partialSignals.get(email)?.dateISO ||
+          scholarshipCompletedSignals.get(email)?.dateISO ||
+          scholarshipPartialSignals.get(email)?.dateISO ||
+          sig.dateISO;
+        const season =
+          seasonDate && seasonDate >= SEASON_BOUNDARY_DATE ? "S18" : "S17";
+
         if (!existing) {
           // CREATE
           // Compute Source from actual presence in each form's signals. An
@@ -612,6 +646,11 @@ export default async function handler(req, res) {
           if (sig.wantsScholarship) {
             props["Wants scholarship"] = { select: { name: sig.wantsScholarship } };
           }
+          // Only tag the active/future cohort (S18). S17 rows are left blank on
+          // purpose — the cohort is closed and Electra filters on Season = S18.
+          if (season === "S18") {
+            props["Season"] = { select: { name: "S18" } };
+          }
           await createPage(props);
           summary.rowsCreated++;
         } else {
@@ -668,6 +707,15 @@ export default async function handler(req, res) {
             propsToUpdate["Wants scholarship"] = {
               select: { name: sig.wantsScholarship },
             };
+          }
+
+          // Season: only tag S18 (the active/future cohort). S17 is closed, so
+          // writing "S17" to the ~5,000 old rows is pure wasted writes that
+          // time the run out. Leaving them blank is fine — Electra filters on
+          // Season = S18, so blank rows are correctly excluded. A row that has
+          // no other change is skipped entirely (see the changedKeys guard).
+          if (season === "S18" && getSelectName(existing, "Season") !== "S18") {
+            propsToUpdate["Season"] = { select: { name: "S18" } };
           }
 
           // Source: union with existing
