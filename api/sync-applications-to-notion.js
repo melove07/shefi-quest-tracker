@@ -646,7 +646,11 @@ export default async function handler(req, res) {
           if (sig.wantsScholarship) {
             props["Wants scholarship"] = { select: { name: sig.wantsScholarship } };
           }
-          props["Season"] = { select: { name: season } };
+          // Only tag the active/future cohort (S18). S17 rows are left blank on
+          // purpose — the cohort is closed and Electra filters on Season = S18.
+          if (season === "S18") {
+            props["Season"] = { select: { name: "S18" } };
+          }
           await createPage(props);
           summary.rowsCreated++;
         } else {
@@ -705,10 +709,13 @@ export default async function handler(req, res) {
             };
           }
 
-          // Season: backfill on blank rows and self-correct if it drifts. This
-          // is what tags the ~5,500 pre-existing rows over the next few runs.
-          if (getSelectName(existing, "Season") !== season) {
-            propsToUpdate["Season"] = { select: { name: season } };
+          // Season: only tag S18 (the active/future cohort). S17 is closed, so
+          // writing "S17" to the ~5,000 old rows is pure wasted writes that
+          // time the run out. Leaving them blank is fine — Electra filters on
+          // Season = S18, so blank rows are correctly excluded. A row that has
+          // no other change is skipped entirely (see the changedKeys guard).
+          if (season === "S18" && getSelectName(existing, "Season") !== "S18") {
+            propsToUpdate["Season"] = { select: { name: "S18" } };
           }
 
           // Source: union with existing
