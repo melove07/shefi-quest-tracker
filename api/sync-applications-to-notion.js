@@ -262,7 +262,7 @@ function extractAnswerByFieldId(item, fieldId) {
 
 // ---------- Notion ----------
 
-async function notionApi(path, opts = {}) {
+async function notionApi(path, opts = {}, attempt = 0) {
   const res = await fetch(`https://api.notion.com/v1${path}`, {
     ...opts,
     headers: {
@@ -272,6 +272,16 @@ async function notionApi(path, opts = {}) {
       ...(opts.headers || {}),
     },
   });
+  // Notion caps the integration at ~3 requests/second and answers a burst with
+  // 429 + a Retry-After header (seconds). Honor it and retry a few times rather
+  // than aborting the whole sync — this is the difference between a run that
+  // resumes and one that dies on the first rate-limit blip.
+  if (res.status === 429 && attempt < 6) {
+    const hdr = parseFloat(res.headers.get("retry-after") || "1");
+    const waitMs = (Number.isFinite(hdr) ? hdr : 1) * 1000 + 300;
+    await sleep(waitMs);
+    return notionApi(path, opts, attempt + 1);
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Notion ${opts.method || "GET"} ${path} ${res.status}: ${text.slice(0, 300)}`);
@@ -292,6 +302,9 @@ async function fetchAllNotionRows() {
     rows.push(...(data.results || []));
     if (!data.has_more) break;
     cursor = data.next_cursor;
+    // The DB is now thousands of rows (55+ pages). Space the reads out so this
+    // phase stays under Notion's ~3 req/s limit instead of firing a burst.
+    await sleep(250);
   }
   return rows;
 }
