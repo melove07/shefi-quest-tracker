@@ -42,6 +42,15 @@ const S17_CUTOFF_ISO = "2026-03-01T00:00:00Z";
 
 const MAIN_FORM_ID = "rUUJ3931";
 
+// Cohort tagging. S17 is the cohort that STARTED 2026-07-21 — the entire
+// March-through-July application wave was people applying to join S17. S18 is
+// the NEXT cohort: "future joining" people who apply on or after the S17 start
+// date. So anyone whose application date is >= this boundary is tagged S18;
+// everyone before it (essentially the whole existing pool) is S17. The sync
+// writes the Season column; Electra targets S18. (Compared against dateISO,
+// which is "YYYY-MM-DD".)
+const SEASON_BOUNDARY_DATE = "2026-07-21";
+
 // Application-stage ordering (lowest -> highest). The sync never downgrades.
 const STAGE_RANK = {
   "Started (partial)": 1,
@@ -553,6 +562,18 @@ export default async function handler(req, res) {
     for (const [email, sig] of signalsByEmail.entries()) {
       const existing = rowByEmail.get(email);
       try {
+        // Cohort tag: derive Season from the applicant's application date —
+        // completion first, then start, then the scholarship dates as a
+        // fallback — compared against the S18 boundary.
+        const seasonDate =
+          completedSignals.get(email)?.dateISO ||
+          partialSignals.get(email)?.dateISO ||
+          scholarshipCompletedSignals.get(email)?.dateISO ||
+          scholarshipPartialSignals.get(email)?.dateISO ||
+          sig.dateISO;
+        const season =
+          seasonDate && seasonDate >= SEASON_BOUNDARY_DATE ? "S18" : "S17";
+
         if (!existing) {
           // CREATE
           // Compute Source from actual presence in each form's signals. An
@@ -612,6 +633,7 @@ export default async function handler(req, res) {
           if (sig.wantsScholarship) {
             props["Wants scholarship"] = { select: { name: sig.wantsScholarship } };
           }
+          props["Season"] = { select: { name: season } };
           await createPage(props);
           summary.rowsCreated++;
         } else {
@@ -668,6 +690,12 @@ export default async function handler(req, res) {
             propsToUpdate["Wants scholarship"] = {
               select: { name: sig.wantsScholarship },
             };
+          }
+
+          // Season: backfill on blank rows and self-correct if it drifts. This
+          // is what tags the ~5,500 pre-existing rows over the next few runs.
+          if (getSelectName(existing, "Season") !== season) {
+            propsToUpdate["Season"] = { select: { name: season } };
           }
 
           // Source: union with existing
