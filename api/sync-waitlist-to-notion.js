@@ -34,7 +34,7 @@ const CRON_SECRET = process.env.CRON_SECRET;
 const NOTION_VERSION = "2022-06-28";
 
 const WAITLIST_FORM_ID = process.env.WAITLIST_FORM_ID || "h9XCDqjk";
-const WAITLIST_DB_ID = process.env.WAITLIST_DB_ID || "903513cbed6d43b2a9b2ca9bfbb852ad";
+const WAITLIST_DB_ID = process.env.WAITLIST_DB_ID || "1f349233dc6c4637bd89dad55bf775d2";
 
 // Field ids from the form definition (see ?probe=fields).
 const CITY_FIELD_ID = "YkXpDZ0RezNA"; // "What is the nearest major city to you?"
@@ -197,8 +197,10 @@ async function notionApi(path, opts = {}) {
   return res.json();
 }
 
-async function fetchExistingEmails() {
-  const emails = new Set();
+// Map of email -> existing Notion page id, so re-runs upsert instead of
+// creating duplicate rows.
+async function fetchExistingPages() {
+  const byEmail = new Map();
   let cursor;
   while (true) {
     const body = { page_size: 100 };
@@ -209,12 +211,12 @@ async function fetchExistingEmails() {
     });
     for (const page of data.results || []) {
       const p = page.properties?.Email;
-      if (p?.type === "email" && p.email) emails.add(p.email.trim().toLowerCase());
+      if (p?.type === "email" && p.email) byEmail.set(p.email.trim().toLowerCase(), page.id);
     }
     if (!data.has_more) break;
     cursor = data.next_cursor;
   }
-  return emails;
+  return byEmail;
 }
 
 function richText(value) {
@@ -227,7 +229,10 @@ function title(value) {
   return { title: [{ type: "text", text: { content: v.slice(0, 200) } }] };
 }
 
-async function createSignup(sig) {
+// The content columns, shared by create and update. Deliberately excludes the
+// Beehiiv sync-status columns: create sets them to Pending, update leaves them
+// alone so an already-synced person is never re-queued for the Beehiiv email.
+function contentProperties(sig) {
   const properties = {
     Name: title(sig.name),
     Email: { email: sig.email },
@@ -240,9 +245,22 @@ async function createSignup(sig) {
   };
   if (sig.country) properties.Country = { select: { name: String(sig.country).slice(0, 100) } };
   if (sig.signedUp) properties["Signed Up"] = { date: { start: sig.signedUp } };
+  return properties;
+}
+
+async function createSignup(sig) {
+  const properties = contentProperties(sig);
+  properties["Beehiiv Sync Status"] = { select: { name: "Pending" } };
   return notionApi(`/pages`, {
     method: "POST",
     body: JSON.stringify({ parent: { database_id: WAITLIST_DB_ID }, properties }),
+  });
+}
+
+async function updateSignup(pageId, sig) {
+  return notionApi(`/pages/${pageId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ properties: contentProperties(sig) }),
   });
 }
 
@@ -320,10 +338,14 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Missing env vars", missing });
   }
 
+  // ?repair=1 also refreshes the content columns of rows that already exist
+  // (never touching their Beehiiv Sync Status). Without it, existing rows are
+  // left untouched — the normal daily behavior.
+  const repair = url.searchParams.get("repair") === "1";
   const startedAt = new Date().toISOString();
   const summary = {
     startedAt, typeformResponses: 0, uniqueSignups: 0,
-    alreadyInNotion: 0, rowsCreated: 0, limit, errors: [],
+    alreadyInNotion: 0, rowsCreated: 0, rowsUpdated: 0, repair, limit, errors: [],
   };
 
   try {
@@ -333,10 +355,21 @@ export default async function handler(req, res) {
     const signups = aggregateSignups(items);
     summary.uniqueSignups = signups.size;
 
-    const existing = await fetchExistingEmails();
+    const existing = await fetchExistingPages();
 
     for (const sig of signups.values()) {
-      if (existing.has(sig.email)) { summary.alreadyInNotion++; continue; }
+      const existingId = existing.get(sig.email);
+      if (existingId) {
+        if (!repair) { summary.alreadyInNotion++; continue; }
+        try {
+          await updateSignup(existingId, sig);
+          summary.rowsUpdated++;
+          await sleep(350);
+        } catch (e) {
+          summary.errors.push({ email: sig.email, error: String(e).slice(0, 200) });
+        }
+        continue;
+      }
       if (limit && summary.rowsCreated >= limit) break;
       try {
         await createSignup(sig);
