@@ -219,6 +219,52 @@ async function fetchExistingPages() {
   return byEmail;
 }
 
+// Collapse duplicate-email rows so repeated or overlapping runs can never
+// leave duplicates behind. Keeps one page per email (prefers an already-Synced
+// row so Beehiiv state is preserved, otherwise the earliest) and archives the
+// rest. Archived rows drop out of queries and the dashboard. Runs at the start
+// of every sync, so the database is self-healing no matter how many times the
+// endpoint is triggered.
+async function dedupeByEmail() {
+  const byEmail = new Map();
+  let cursor;
+  while (true) {
+    const body = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+    const data = await notionApi(`/databases/${WAITLIST_DB_ID}/query`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    for (const page of data.results || []) {
+      const p = page.properties?.Email;
+      const email = p?.type === "email" && p.email ? p.email.trim().toLowerCase() : null;
+      if (!email) continue;
+      const status = page.properties?.["Beehiiv Sync Status"]?.select?.name || "";
+      if (!byEmail.has(email)) byEmail.set(email, []);
+      byEmail.get(email).push({ id: page.id, status, created: page.created_time || "" });
+    }
+    if (!data.has_more) break;
+    cursor = data.next_cursor;
+  }
+
+  let archived = 0;
+  for (const pages of byEmail.values()) {
+    if (pages.length <= 1) continue;
+    pages.sort((a, b) => {
+      const sa = a.status === "Synced" ? 0 : 1;
+      const sb = b.status === "Synced" ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      return (a.created || "").localeCompare(b.created || "");
+    });
+    for (const extra of pages.slice(1)) {
+      await notionApi(`/pages/${extra.id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
+      archived++;
+      await sleep(200);
+    }
+  }
+  return archived;
+}
+
 function richText(value) {
   if (!value) return { rich_text: [] };
   return { rich_text: [{ type: "text", text: { content: String(value).slice(0, 2000) } }] };
@@ -345,10 +391,13 @@ export default async function handler(req, res) {
   const startedAt = new Date().toISOString();
   const summary = {
     startedAt, typeformResponses: 0, uniqueSignups: 0,
-    alreadyInNotion: 0, rowsCreated: 0, rowsUpdated: 0, repair, limit, errors: [],
+    rowsDeduped: 0, alreadyInNotion: 0, rowsCreated: 0, rowsUpdated: 0, repair, limit, errors: [],
   };
 
   try {
+    // Self-heal first: archive any duplicate-email rows left by earlier runs.
+    summary.rowsDeduped = await dedupeByEmail();
+
     const items = await fetchAllCompleted(WAITLIST_FORM_ID);
     summary.typeformResponses = items.length;
 
