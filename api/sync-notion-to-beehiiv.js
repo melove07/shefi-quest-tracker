@@ -22,6 +22,9 @@
 //   WAITLIST_DB_ID           — defaults to the AI Cohort Waitlist Signups DB
 //   BEEHIIV_SYNC_ENABLED     — scheduled runs no-op unless this is "true".
 //                              (manual ?debug_run/?test_email always run.)
+//   BEEHIIV_SYNC_START       — optional YYYY-MM-DD (UTC). Scheduled runs hold
+//                              (no-op) until this date, so the send can be armed
+//                              early and fire automatically on the day.
 //   CRON_SECRET              — if set, scheduled runs require the bearer token.
 //
 // Manual triggers (open in a browser tab on the deployed site):
@@ -39,6 +42,9 @@ const BEEHIIV_API_KEY = process.env.BEEHIIV_API_KEY;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const CRON_SECRET = process.env.CRON_SECRET;
 const SYNC_ENABLED = process.env.BEEHIIV_SYNC_ENABLED === "true";
+// Optional hold-until date (YYYY-MM-DD, UTC). Scheduled runs no-op before it,
+// so the send can be armed in advance and fire automatically on the day.
+const SYNC_START = process.env.BEEHIIV_SYNC_START || "";
 const NOTION_VERSION = "2022-06-28";
 
 const PUB = process.env.BEEHIIV_PUBLICATION_ID || "pub_ec2337ac-661e-4df4-9ea6-7a9ba492912e";
@@ -220,6 +226,9 @@ export default async function handler(req, res) {
     if (!SYNC_ENABLED) {
       return res.status(200).json({ skipped: "BEEHIIV_SYNC_ENABLED is not 'true'" });
     }
+    if (SYNC_START && new Date().toISOString().slice(0, 10) < SYNC_START) {
+      return res.status(200).json({ skipped: `holding until BEEHIIV_SYNC_START (${SYNC_START})` });
+    }
   }
 
   if (!NOTION_TOKEN) {
@@ -257,7 +266,9 @@ export default async function handler(req, res) {
         await markRow(page.id, "Error", msg).catch(() => {});
         summary.errors.push({ email, error: msg });
       }
-      await sleep(300); // stay under Beehiiv + Notion rate limits
+      await sleep(120); // small pause; the 3 sequential Beehiiv calls + 1 Notion
+                        // write per person already keep us under the rate limits,
+                        // so a short pause clears more per 5-min run on the backlog.
     }
 
     const endedAt = Date.now();
