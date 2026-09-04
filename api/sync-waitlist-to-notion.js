@@ -27,6 +27,10 @@
 //                      a small test batch before importing everyone
 
 export const maxDuration = 300; // 5 minutes
+// Stop doing work this many ms into the run and return cleanly, leaving a margin
+// under maxDuration so a big backlog never trips the platform 504. Whatever is
+// left (dupes to archive, people to add) is picked up by the next run.
+const RUN_BUDGET_MS = 250000;
 
 const TYPEFORM_TOKEN = process.env.TYPEFORM_TOKEN;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
@@ -227,7 +231,12 @@ async function fetchExistingPages() {
 // how many times — or how concurrently — the endpoint is triggered: if two
 // overlapping runs each create a full set of rows, whichever finishes last
 // collapses them back to one per email on its way out.
-async function dedupeByEmail() {
+// `deadline` is an epoch-ms cutoff; archiving stops cleanly once it passes so a
+// large backlog never runs the function into the platform timeout (a 504). Any
+// duplicates left behind are collapsed by the next run — the DB still converges,
+// it just takes a few runs instead of choking on everything at once. Returns
+// { archived, remaining } so the caller can report progress.
+async function dedupeByEmail(deadline) {
   const byEmail = new Map();
   let cursor;
   while (true) {
@@ -250,6 +259,7 @@ async function dedupeByEmail() {
   }
 
   let archived = 0;
+  let remaining = 0;
   for (const pages of byEmail.values()) {
     if (pages.length <= 1) continue;
     pages.sort((a, b) => {
@@ -259,12 +269,13 @@ async function dedupeByEmail() {
       return (a.created || "").localeCompare(b.created || "");
     });
     for (const extra of pages.slice(1)) {
+      if (deadline && Date.now() > deadline) { remaining++; continue; }
       await notionApi(`/pages/${extra.id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
       archived++;
       await sleep(150);
     }
   }
-  return archived;
+  return { archived, remaining };
 }
 
 function richText(value) {
@@ -391,15 +402,18 @@ export default async function handler(req, res) {
   // left untouched — the normal daily behavior.
   const repair = url.searchParams.get("repair") === "1";
   const startedAt = new Date().toISOString();
+  const deadline = Date.now() + RUN_BUDGET_MS;
   const summary = {
     startedAt, typeformResponses: 0, uniqueSignups: 0,
-    rowsDedupedStart: 0, rowsDedupedEnd: 0, alreadyInNotion: 0, rowsCreated: 0,
-    rowsUpdated: 0, repair, limit, errors: [],
+    rowsDedupedStart: 0, rowsDedupedEnd: 0, dupesRemaining: 0, alreadyInNotion: 0,
+    rowsCreated: 0, rowsUpdated: 0, stoppedEarly: false, repair, limit, errors: [],
   };
 
   try {
     // Self-heal first: archive any duplicate-email rows left by earlier runs.
-    summary.rowsDedupedStart = await dedupeByEmail();
+    const startDedupe = await dedupeByEmail(deadline);
+    summary.rowsDedupedStart = startDedupe.archived;
+    summary.dupesRemaining = startDedupe.remaining;
 
     const items = await fetchAllCompleted(WAITLIST_FORM_ID);
     summary.typeformResponses = items.length;
@@ -410,6 +424,8 @@ export default async function handler(req, res) {
     const existing = await fetchExistingPages();
 
     for (const sig of signups.values()) {
+      // Stop before the platform timeout; the rest is picked up next run.
+      if (Date.now() > deadline) { summary.stoppedEarly = true; break; }
       const existingId = existing.get(sig.email);
       if (existingId) {
         if (!repair) { summary.alreadyInNotion++; continue; }
@@ -435,7 +451,12 @@ export default async function handler(req, res) {
     // Self-heal again on the way out: if this run overlapped another and both
     // created rows, collapse any duplicate-email rows back to one before we
     // return, so a race can never leave duplicates behind for the dashboard.
-    summary.rowsDedupedEnd = await dedupeByEmail();
+    // Skip when we're already out of time — the next run handles it.
+    if (Date.now() < deadline) {
+      const endDedupe = await dedupeByEmail(deadline);
+      summary.rowsDedupedEnd = endDedupe.archived;
+      summary.dupesRemaining = endDedupe.remaining;
+    }
 
     const endedAt = new Date().toISOString();
     return res.status(200).json({ ...summary, endedAt, durationMs: Date.parse(endedAt) - Date.parse(startedAt) });
