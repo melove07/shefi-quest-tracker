@@ -266,7 +266,9 @@ export default async function handler(req, res) {
         await markRow(page.id, "Error", msg).catch(() => {});
         summary.errors.push({ email, error: msg });
       }
-      await sleep(300); // stay under Beehiiv + Notion rate limits
+      await sleep(120); // small pause; the 3 sequential Beehiiv calls + 1 Notion
+                        // write per person already keep us under the rate limits,
+                        // so a short pause clears more per 5-min run on the backlog.
     }
 
     const endedAt = Date.now();
