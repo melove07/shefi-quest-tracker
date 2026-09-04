@@ -222,9 +222,11 @@ async function fetchExistingPages() {
 // Collapse duplicate-email rows so repeated or overlapping runs can never
 // leave duplicates behind. Keeps one page per email (prefers an already-Synced
 // row so Beehiiv state is preserved, otherwise the earliest) and archives the
-// rest. Archived rows drop out of queries and the dashboard. Runs at the start
-// of every sync, so the database is self-healing no matter how many times the
-// endpoint is triggered.
+// rest. Archived rows drop out of queries and the dashboard. Runs at BOTH the
+// start and the end of every sync, so the database is self-healing no matter
+// how many times — or how concurrently — the endpoint is triggered: if two
+// overlapping runs each create a full set of rows, whichever finishes last
+// collapses them back to one per email on its way out.
 async function dedupeByEmail() {
   const byEmail = new Map();
   let cursor;
@@ -259,7 +261,7 @@ async function dedupeByEmail() {
     for (const extra of pages.slice(1)) {
       await notionApi(`/pages/${extra.id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
       archived++;
-      await sleep(200);
+      await sleep(150);
     }
   }
   return archived;
@@ -391,12 +393,13 @@ export default async function handler(req, res) {
   const startedAt = new Date().toISOString();
   const summary = {
     startedAt, typeformResponses: 0, uniqueSignups: 0,
-    rowsDeduped: 0, alreadyInNotion: 0, rowsCreated: 0, rowsUpdated: 0, repair, limit, errors: [],
+    rowsDedupedStart: 0, rowsDedupedEnd: 0, alreadyInNotion: 0, rowsCreated: 0,
+    rowsUpdated: 0, repair, limit, errors: [],
   };
 
   try {
     // Self-heal first: archive any duplicate-email rows left by earlier runs.
-    summary.rowsDeduped = await dedupeByEmail();
+    summary.rowsDedupedStart = await dedupeByEmail();
 
     const items = await fetchAllCompleted(WAITLIST_FORM_ID);
     summary.typeformResponses = items.length;
@@ -428,6 +431,11 @@ export default async function handler(req, res) {
         summary.errors.push({ email: sig.email, error: String(e).slice(0, 200) });
       }
     }
+
+    // Self-heal again on the way out: if this run overlapped another and both
+    // created rows, collapse any duplicate-email rows back to one before we
+    // return, so a race can never leave duplicates behind for the dashboard.
+    summary.rowsDedupedEnd = await dedupeByEmail();
 
     const endedAt = new Date().toISOString();
     return res.status(200).json({ ...summary, endedAt, durationMs: Date.parse(endedAt) - Date.parse(startedAt) });
