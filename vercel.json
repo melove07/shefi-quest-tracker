@@ -14,7 +14,7 @@
     },
     {
       "path": "/api/sync-notion-to-beehiiv",
-      "schedule": "30 11 * * *"
+      "schedule": "0 13-15 * * *"
     }
   ]
 }
