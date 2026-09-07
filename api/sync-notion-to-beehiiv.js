@@ -25,7 +25,13 @@
 //   BEEHIIV_SYNC_START       — optional YYYY-MM-DD (UTC). Scheduled runs hold
 //                              (no-op) until this date, so the send can be armed
 //                              early and fire automatically on the day.
+//   BEEHIIV_SYNC_CONCURRENCY — how many people to process in parallel (default
+//                              4, clamped 1..10). One run clears ~600 at 4.
 //   CRON_SECRET              — if set, scheduled runs require the bearer token.
+//
+// People are processed through a small concurrent worker pool, and every API
+// call retries on rate-limit/transient errors — so one 5-min run clears the
+// whole backlog while staying safe (idempotent: no double-sends on retry).
 //
 // Manual triggers (open in a browser tab on the deployed site):
 //   ?test_email=you@example.com&first=Ada&last=Lovelace
@@ -53,10 +59,41 @@ const WAITLIST_DB_ID = process.env.WAITLIST_DB_ID || "1f349233dc6c4637bd89dad55b
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// How many people to process at once. Each person is ~4 sequential API calls,
+// so a small pool multiplies throughput and lets one 5-minute run clear the
+// whole backlog. Retry/backoff below absorbs any rate-limit bumps. Override
+// with BEEHIIV_SYNC_CONCURRENCY (clamped 1..10) if a limit ever needs tuning.
+const CONCURRENCY = Math.min(Math.max(parseInt(process.env.BEEHIIV_SYNC_CONCURRENCY || "4", 10) || 4, 1), 10);
+
+// fetch() with automatic retry on 429 (rate limit) and 5xx (transient),
+// honoring Retry-After. Safe because every request here is idempotent: Beehiiv
+// keys subscribers by email, enrollment is enter-once, and Notion status writes
+// are last-write-wins — so a retried call can never double-send or corrupt data.
+async function fetchRetry(url, opts = {}) {
+  const MAX_RETRIES = 5;
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, opts);
+    } catch (e) {
+      if (attempt >= MAX_RETRIES) throw e;
+      await sleep(Math.min(500 * 2 ** attempt, 8000) + Math.random() * 250);
+      continue;
+    }
+    if (res.status !== 429 && res.status < 500) return res;
+    if (attempt >= MAX_RETRIES) return res;
+    const retryAfter = parseFloat(res.headers.get("retry-after") || "");
+    const backoff = Number.isFinite(retryAfter)
+      ? Math.min(retryAfter * 1000, 15000)
+      : Math.min(500 * 2 ** attempt, 8000);
+    await sleep(backoff + Math.random() * 250);
+  }
+}
+
 // ---------- Beehiiv ----------
 
 async function beehiiv(path, opts = {}) {
-  const res = await fetch(`https://api.beehiiv.com/v2${path}`, {
+  const res = await fetchRetry(`https://api.beehiiv.com/v2${path}`, {
     ...opts,
     headers: {
       Authorization: `Bearer ${BEEHIIV_API_KEY}`,
@@ -135,7 +172,7 @@ async function syncOne(email, firstName, lastName) {
 // ---------- Notion ----------
 
 async function notionApi(path, opts = {}) {
-  const res = await fetch(`https://api.notion.com/v1${path}`, {
+  const res = await fetchRetry(`https://api.notion.com/v1${path}`, {
     ...opts,
     headers: {
       Authorization: `Bearer ${NOTION_TOKEN}`,
@@ -236,40 +273,49 @@ export default async function handler(req, res) {
   }
 
   const startedAt = Date.now();
-  const summary = { startedAt: new Date(startedAt).toISOString(), pending: 0, synced: 0, errors: [], stoppedEarly: false };
+  const summary = { startedAt: new Date(startedAt).toISOString(), pending: 0, synced: 0, errors: [], stoppedEarly: false, concurrency: CONCURRENCY };
 
   try {
     const rows = await fetchPendingRows();
     summary.pending = rows.length;
 
-    for (const page of rows) {
-      if (Date.now() - startedAt > TIME_BUDGET_MS) { summary.stoppedEarly = true; break; }
-      if (limit && summary.synced >= limit) break;
+    // Process people through a small pool of workers pulling from a shared
+    // index. Counter/array mutations are safe: JS is single-threaded, so ++
+    // and push() are atomic between awaits. `limit` claims by index, so a test
+    // (?limit=5) processes exactly the first 5 rows.
+    let next = 0;
+    async function worker() {
+      while (true) {
+        if (Date.now() - startedAt > TIME_BUDGET_MS) { summary.stoppedEarly = true; return; }
+        const i = next++;
+        if (i >= rows.length) return;
+        if (limit && i >= limit) return;
+        const page = rows[i];
 
-      const props = page.properties || {};
-      const email = props.Email?.email ? props.Email.email.trim().toLowerCase() : "";
-      const firstName = plainText(props["First name"]);
-      const lastName = plainText(props["Last name"]);
+        const props = page.properties || {};
+        const email = props.Email?.email ? props.Email.email.trim().toLowerCase() : "";
+        const firstName = plainText(props["First name"]);
+        const lastName = plainText(props["Last name"]);
 
-      if (!email) {
-        await markRow(page.id, "Error", "No email on this row").catch(() => {});
-        summary.errors.push({ pageId: page.id, error: "No email" });
-        continue;
+        if (!email) {
+          await markRow(page.id, "Error", "No email on this row").catch(() => {});
+          summary.errors.push({ pageId: page.id, error: "No email" });
+          continue;
+        }
+
+        try {
+          await syncOne(email, firstName, lastName);
+          await markRow(page.id, "Synced");
+          summary.synced++;
+        } catch (e) {
+          const msg = String(e.message || e).slice(0, 300);
+          await markRow(page.id, "Error", msg).catch(() => {});
+          summary.errors.push({ email, error: msg });
+        }
       }
-
-      try {
-        await syncOne(email, firstName, lastName);
-        await markRow(page.id, "Synced");
-        summary.synced++;
-      } catch (e) {
-        const msg = String(e.message || e).slice(0, 300);
-        await markRow(page.id, "Error", msg).catch(() => {});
-        summary.errors.push({ email, error: msg });
-      }
-      await sleep(120); // small pause; the 3 sequential Beehiiv calls + 1 Notion
-                        // write per person already keep us under the rate limits,
-                        // so a short pause clears more per 5-min run on the backlog.
     }
+
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
     const endedAt = Date.now();
     return res.status(200).json({ ...summary, endedAt: new Date(endedAt).toISOString(), durationMs: endedAt - startedAt });
