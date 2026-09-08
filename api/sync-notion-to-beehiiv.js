@@ -63,7 +63,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // so a small pool multiplies throughput and lets one 5-minute run clear the
 // whole backlog. Retry/backoff below absorbs any rate-limit bumps. Override
 // with BEEHIIV_SYNC_CONCURRENCY (clamped 1..10) if a limit ever needs tuning.
-const CONCURRENCY = Math.min(Math.max(parseInt(process.env.BEEHIIV_SYNC_CONCURRENCY || "4", 10) || 4, 1), 10);
+const CONCURRENCY = Math.min(Math.max(parseInt(process.env.BEEHIIV_SYNC_CONCURRENCY || "2", 10) || 2, 1), 10);
 
 // fetch() with automatic retry on 429 (rate limit) and 5xx (transient),
 // honoring Retry-After. Safe because every request here is idempotent: Beehiiv
@@ -188,13 +188,23 @@ async function notionApi(path, opts = {}) {
   return res.json();
 }
 
+// Fetch rows still needing a send: "Pending" (never attempted) OR "Error"
+// (a previous attempt failed, e.g. a transient Beehiiv 429). Re-attempting an
+// Error row is safe — the subscriber upsert is email-keyed and the automation
+// is enter-once, so no one is emailed twice — and it means a rate-limited row
+// self-heals on the next run instead of being stranded in Error forever.
 async function fetchPendingRows() {
   const rows = [];
   let cursor;
   while (true) {
     const body = {
       page_size: 100,
-      filter: { property: "Beehiiv Sync Status", select: { equals: "Pending" } },
+      filter: {
+        or: [
+          { property: "Beehiiv Sync Status", select: { equals: "Pending" } },
+          { property: "Beehiiv Sync Status", select: { equals: "Error" } },
+        ],
+      },
     };
     if (cursor) body.start_cursor = cursor;
     const data = await notionApi(`/databases/${WAITLIST_DB_ID}/query`, {
