@@ -15,6 +15,10 @@
     {
       "path": "/api/sync-notion-to-beehiiv",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/sync-survey-to-notion",
+      "schedule": "30 13 * * *"
     }
   ]
 }
