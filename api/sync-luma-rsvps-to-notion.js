@@ -293,8 +293,15 @@ export default async function handler(req, res) {
   const limitParam = parseInt(url.searchParams.get("limit") || "", 10);
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : null;
 
+  // Without an API key (Luma Plus) the API route can't run. Scheduled runs
+  // no-op quietly so the cron never fails daily; the endpoint stays dormant and
+  // ready if a key is ever added. Manual probe/debug runs still report the gap.
+  const isManual = isDebugRun || !!probe;
   if (!LUMA_API_KEY) {
-    return res.status(500).json({ error: "Missing env var", missing: { LUMA_API_KEY: true } });
+    if (!isManual) {
+      return res.status(200).json({ skipped: "LUMA_API_KEY not set (Luma Plus required) — cron dormant" });
+    }
+    return res.status(500).json({ error: "Missing env var", missing: { LUMA_API_KEY: true }, hint: "The Luma API needs Luma Plus. Without it, cross-reference from a guest-list CSV export instead." });
   }
 
   // Probe: list the API key's events so the event id can be found. Read-only.
