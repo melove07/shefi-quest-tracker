@@ -34,8 +34,6 @@ const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
 const GUIDE_URL =
   process.env.GUIDE_URL ||
   "https://shefi-quest-tracker.vercel.app/ai-will-survive-workflows-guide.pdf";
-const INNER_CIRCLE_URL =
-  process.env.INNER_CIRCLE_URL || "https://pctxqsdzgk0.typeform.com/innercircle";
 const WEBHOOK_KEY = process.env.AI_GUIDE_WEBHOOK_KEY || null;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const AI_GUIDE_DB_ID = process.env.AI_GUIDE_DB_ID;
@@ -150,9 +148,6 @@ Thank you again for sharing your feedback!
 
 If you want even more resources, check out shefi.org/resources.
 
-If you want to keep learning with me and the SheFi community, you can apply to the Inner Circle here:
-${INNER_CIRCLE_URL}
-
 More content from the class is coming over the next few days.
 
 Best,
@@ -164,8 +159,6 @@ function emailHtml(first) {
   return `<p>${hi}</p>
 <p>Here's your <strong>AI Workflow Guide</strong>: <a href="${GUIDE_URL}">download it here</a>. Thank you again for sharing your feedback!</p>
 <p>If you want even more resources, check out <a href="https://shefi.org/resources">shefi.org/resources</a>.</p>
-<p>If you want to keep learning with me and the SheFi community, you can apply to the Inner Circle here:</p>
-<p><a href="${INNER_CIRCLE_URL}"><strong>APPLY TO THE INNER CIRCLE</strong></a></p>
 <p>More content from the class is coming over the next few days.</p>
 <p>Best,<br>Maggie</p>`;
 }
