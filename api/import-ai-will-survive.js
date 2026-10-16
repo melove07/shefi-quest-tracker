@@ -20,9 +20,9 @@
 //   BEEHIIV_PUBLICATION_ID (defaults to SheFi), AUDIENCE_DB_ID (defaults below),
 //   CRON_SECRET (if set, required as ?token= or Bearer)
 //
-// Trigger in a browser tab on the deployed site:
-//   /api/import-ai-will-survive?token=YOUR_CRON_SECRET&dry_run=1   (preview: counts only, no writes)
-//   /api/import-ai-will-survive?token=YOUR_CRON_SECRET             (run it)
+// Trigger in a browser tab on the deployed site (token = CRON_SECRET or the one-off passphrase):
+//   /api/import-ai-will-survive?token=TOKEN&dry_run=1   (preview: counts only, no writes)
+//   /api/import-ai-will-survive?token=TOKEN             (run it)
 //   &limit=N   process only the first N rows (staged runs)
 
 export const maxDuration = 300;
@@ -169,7 +169,8 @@ export default async function handler(req, res) {
     if (!BEEHIIV_API_KEY || !NOTION_TOKEN) return res.status(500).json({ error: "Missing BEEHIIV_API_KEY or NOTION_TOKEN" });
     const q = req.query || {};
     const token = q.token || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-    if (CRON_SECRET && token !== CRON_SECRET) return res.status(401).json({ error: "Unauthorized" });
+    const ACCESS_PASS = "shefi-aiws-7h2k9x"; // one-off passphrase so the owner can trigger without CRON_SECRET; endpoint removed after use
+    if (token !== ACCESS_PASS && CRON_SECRET && token !== CRON_SECRET) return res.status(401).json({ error: "Unauthorized" });
 
     let rows = await readAudience();
     const limit = parseInt(q.limit || "0", 10);
