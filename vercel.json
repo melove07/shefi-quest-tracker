@@ -20,5 +20,11 @@
       "path": "/api/sync-survey-to-notion",
       "schedule": "30 13 * * *"
     }
+  ],
+  "rewrites": [
+    {
+      "source": "/ai201",
+      "destination": "/api/ai201"
+    }
   ]
 }
