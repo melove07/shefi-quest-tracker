@@ -144,9 +144,9 @@ function emailText(first) {
   const hi = first ? `Hi ${first},` : "Hi there,";
   return `${hi}
 
-Here's your AI 101 take-home guide. Download it here: ${GUIDE_URL}
+Thank you for your feedback on AI 101! As promised, here are your take-home resources from the workshop — the setup slides plus a prompt you can copy and try yourself.
 
-Thank you again for sharing your feedback!
+Download them here: ${GUIDE_URL}
 
 If you want even more resources, check out shefi.org/resources.
 
@@ -162,7 +162,7 @@ Maggie`;
 function emailHtml(first) {
   const hi = first ? `Hi ${first},` : "Hi there,";
   return `<p>${hi}</p>
-<p>Here's your <strong>AI 101 take-home guide</strong>: <a href="${GUIDE_URL}">download it here</a>. Thank you again for sharing your feedback!</p>
+<p>Thank you for your feedback on AI 101! As promised, here are your <strong>take-home resources from the workshop</strong> — the setup slides plus a prompt you can copy and try yourself. <a href="${GUIDE_URL}">Download them here</a>.</p>
 <p>If you want even more resources, check out <a href="https://shefi.org/resources">shefi.org/resources</a>.</p>
 <p>If you want to keep learning with me and the SheFi community, you can apply to the Inner Circle here:</p>
 <p><a href="${INNER_CIRCLE_URL}"><strong>APPLY TO THE INNER CIRCLE</strong></a></p>
@@ -180,7 +180,7 @@ async function sendGuideEmail(to, first) {
   await transport.sendMail({
     from: `Maggie @ SheFi <${GMAIL_SENDER}>`,
     to,
-    subject: "Your AI 101 Take-Home Guide 🎉",
+    subject: "Your AI 101 take-home resources 🎉",
     text: emailText(first),
     html: emailHtml(first),
   });
