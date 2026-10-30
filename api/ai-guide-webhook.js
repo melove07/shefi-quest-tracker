@@ -33,7 +33,7 @@ const GMAIL_SENDER = process.env.GMAIL_SENDER;
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
 const GUIDE_URL =
   process.env.GUIDE_URL ||
-  "https://shefi-quest-tracker.vercel.app/ai-will-survive-workflows-guide.pdf";
+  "https://shefi-quest-tracker.vercel.app/ai-101-workshop-take-home-resources.pdf";
 const INNER_CIRCLE_URL =
   process.env.INNER_CIRCLE_URL || "https://pctxqsdzgk0.typeform.com/innercircle";
 const WEBHOOK_KEY = process.env.AI_GUIDE_WEBHOOK_KEY || null;
@@ -144,7 +144,7 @@ function emailText(first) {
   const hi = first ? `Hi ${first},` : "Hi there,";
   return `${hi}
 
-Here's your AI Workflow Guide. Download it here: ${GUIDE_URL}
+Here's your AI 101 take-home guide. Download it here: ${GUIDE_URL}
 
 Thank you again for sharing your feedback!
 
@@ -162,7 +162,7 @@ Maggie`;
 function emailHtml(first) {
   const hi = first ? `Hi ${first},` : "Hi there,";
   return `<p>${hi}</p>
-<p>Here's your <strong>AI Workflow Guide</strong>: <a href="${GUIDE_URL}">download it here</a>. Thank you again for sharing your feedback!</p>
+<p>Here's your <strong>AI 101 take-home guide</strong>: <a href="${GUIDE_URL}">download it here</a>. Thank you again for sharing your feedback!</p>
 <p>If you want even more resources, check out <a href="https://shefi.org/resources">shefi.org/resources</a>.</p>
 <p>If you want to keep learning with me and the SheFi community, you can apply to the Inner Circle here:</p>
 <p><a href="${INNER_CIRCLE_URL}"><strong>APPLY TO THE INNER CIRCLE</strong></a></p>
@@ -180,7 +180,7 @@ async function sendGuideEmail(to, first) {
   await transport.sendMail({
     from: `Maggie @ SheFi <${GMAIL_SENDER}>`,
     to,
-    subject: "Your AI Workflow Guide 🎉",
+    subject: "Your AI 101 Take-Home Guide 🎉",
     text: emailText(first),
     html: emailHtml(first),
   });
